@@ -14,15 +14,14 @@
                              remove-cpath
                              redirect?
                              redirect-301
-                             append-to-redirect-loc]]
-        [sandbar.stateful-session :only [session-get
-                                         session-put!
-                                         session-delete-key!]])
+                             append-to-redirect-loc]])
   (:require [clojure.contrib.error-kit :as kit]))
 
 (def *hash-delay* 1000)
 
 (def *sandbar-current-user* nil)
+
+(def *ring-session* {})
 
 (kit/deferror *access-error* [] [n]
   {:msg (str "Access error: " n)
@@ -154,7 +153,7 @@
 ;;
 
 (defn current-user []
-  (or *sandbar-current-user* (session-get :current-user)))
+  (or *sandbar-current-user* (:current-user *ring-session*)))
 
 (defn current-username []
   (:name (current-user)))
@@ -206,9 +205,8 @@
   (let [logout-page (if-let [p (:logout-page props)]
                       (cpath p)
                       (cpath "/"))]
-    (redirect
-     (do (session-delete-key! :current-user)
-         logout-page))))
+    (let [session (dissoc *ring-session* :current-user)]
+      (assoc (redirect logout-page) :session session))))
 
 (defn with-secure-channel
   "Middleware function to redirect to either a secure or insecure channel."
@@ -229,33 +227,34 @@
   ([handler config auth-fn] (with-security handler config auth-fn ""))
   ([handler config auth-fn uri-prefix]
      (fn [request]
-       (let [required-roles (required-roles config request)
-             user (current-user)
-             user-status (if (and (auth-required? required-roles)
-                                  (nil? user))
-                           (auth-fn request)
-                           user)]
-         (cond (redirect? user-status)
-               (append-to-redirect-loc user-status uri-prefix)
-               (allow-access? required-roles (:roles user-status))
-               (binding [*sandbar-current-user* user-status]
-                 (kit/with-handler
-                   (handler request)
-                   (kit/handle *access-error* [n]
-                               (redirect-to-permission-denied uri-prefix))
-                   (kit/handle *authentication-error* [n]
-                               (if *sandbar-current-user*
-                                 (redirect-to-authentication-error uri-prefix)
-                                 (let [user-status (auth-fn request)]
-                                   (if (redirect? user-status)
-                                     (append-to-redirect-loc user-status
-                                                             uri-prefix)
-                                     (do (session-put! :current-user
-                                                       user-status)
-                                         (set! *sandbar-current-user*
-                                               user-status)
-                                         (handler request))))))))
-               :else (redirect-to-permission-denied uri-prefix))))))
+       (binding [*ring-session* (:session request)]
+         (let [required-roles (required-roles config request)
+               user (current-user)
+               user-status (if (and (auth-required? required-roles)
+                                    (nil? user))
+                             (auth-fn request)
+                             user)]
+           (cond (redirect? user-status)
+                 (append-to-redirect-loc user-status uri-prefix)
+                 (allow-access? required-roles (:roles user-status))
+                 (binding [*sandbar-current-user* user-status]
+                   (kit/with-handler
+                     (handler request)
+                     (kit/handle *access-error* [n]
+                                 (redirect-to-permission-denied uri-prefix))
+                     (kit/handle *authentication-error* [n]
+                                 (if *sandbar-current-user*
+                                   (redirect-to-authentication-error uri-prefix)
+                                   (let [user-status (auth-fn request)]
+                                     (if (redirect? user-status)
+                                       (append-to-redirect-loc user-status
+                                                               uri-prefix)
+                                       (let [session
+                                             (assoc *ring-session*
+                                                    :current-user user-status)]
+                                         (set! *sandbar-current-user* user-status)
+                                         (handler (assoc request :session session)))))))))
+                 :else (redirect-to-permission-denied uri-prefix)))))))
 
 (defmulti create-authenticator (fn [& args] (first args)))
 
